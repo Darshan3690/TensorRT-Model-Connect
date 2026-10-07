@@ -2,8 +2,7 @@
 
 Accuracy and performance qualification of every ready catalog model against its native
 (unconverted) Hugging Face / PyTorch model, driven by [AIPerf](https://github.com/ai-dynamo/aiperf).
-The scheme, its statistics, and its per-Task contracts are in [DESIGN.md](DESIGN.md); it does not use
-`qualification_tests/benchmark_qualification`.
+It does not use `qualification_tests/benchmark_qualification`.
 
 - **Acc**: TRTMC must be as accurate as the native model on the Task's workloads. Both sides answer the
   Task's gold-labelled benchmarks (`absolute`) and each benchmark is a paired non-inferiority decision
@@ -35,26 +34,52 @@ RefCOCO, LibriSpeech WER, STS-B, SciFact retrieval / rerank, HumanEval + MBPP, I
 ADE20K mIoU, mask IoU, ETTh1 MSE, WMT / FLORES chrF++). Selections are seeded and stratified; prompts are
 filtered to the shipped bundle's length (rendered through the chat template on the chat route). A model
 whose catalog request samples answers once per seed on each side and is judged on per-problem seed means.
-Each benchmark's `margin`, `relative_margin`, `min_native` (suitability floor), and sizes are argued in
-DESIGN.md Section 4.
+Each benchmark's `margin`, `relative_margin`, `min_native` (suitability floor), and size are set in
+`config/tasks.yaml`, each with its reason.
 
 Conversion-parity benchmarks (`gold_metrics.PARITY`) compare each output with the native one within a
 tolerance: raw encoders' vectors, MoGe geometry, ACT action chunks, stereo disparities, PersonaPlex speech.
 Inputs a family prepares itself come from its `reference/inputs.py` (`family_inputs` suites).
 
 Checks for every model of a Task (`supplementary`): text-to-speech round-trip WER (corpus, bootstrap) and
-audio validity; GenEval-style pass rate for text-to-image families that take caller latents (the same
+audio validity (every output finite and not silent; the median per-sentence duration ratio to the native model
+within 0.5-2, as a sampling model's single utterance may run to its length limit on either side; an error
+when no sentence has audio on both sides); GenEval-style pass rate for text-to-image families that take caller latents (the same
 initial noise on both sides); CLIP-T and video validity for videos; MagicBrush CLIP-I and DINO for edits;
 world-model video parity. The pixel parity under latent replay is reported only (`informational`).
 
 A suite with `base: catalog` overrides the profile's catalog request with its dataset fields.
+
+### Verdict rules
+
+- Both sides answer the same problems, selected and fitted to the shipped bundle's sequence length; a suite with no
+  problem that fits is an `error` that says so.
+- An input TRTMC rejects as beyond the bundle's capacity (`backend_rejected_request` exceeding a prefill profile, a
+  KV cache, or an input limit) leaves the comparison on both sides, and the entry reports how many did
+  (`out_of_capacity`); not in a corpus whose rows refer to each other (STS pairs, a retrieval query and its
+  documents).
+- Any other problem the native model answered and TRTMC did not (a failed or rejected request, an unusable output)
+  counts as TRTMC's wrong answer: a wrong right/wrong answer, a parity sample outside the tolerance, an empty WER or
+  chrF text. A corpus metric without an empty answer (vectors, masks, detections, forecasts) keeps the problem
+  missing, an `error`, as does a problem the native model did not answer.
+- A parity benchmark against a native model that ran at another precision than TRTMC (the candidate's failed
+  natively) uses its `mismatched_precision_gate`.
+- Native copies that run out of GPU memory answer again as half as many copies, down to one.
+- Every AIPerf run has a deadline: three times the profile's seconds in the run's ledger (`run-all --ledger`, at
+  least ten minutes), else 12 hours; a GPU phase that fails before producing its result runs once more.
+- `summary` reports one result per model, worst first: White (no verdict: an error or a failed build; or no valid
+  comparison: the native model below a benchmark's floor, a Task without an Acc check, timings that cannot be
+  compared), Red (Acc or Perf worse than native beyond its margin), Yellow (Perf about equal to native, which counts
+  as a pass, or an Acc difference not shown either way), Green (a pass). Perf is reported on the catalog request.
 
 ### Performance
 
 **L1** times each timed request on both servers (warmup, then N requests, R runs): the catalog testcase
 (its greedy variant when it samples text; the first gold problem when the testcase is no workload) and, for
 text generation, a near-capacity request filling the bundle. The statistic is the server-side model-call
-p50 per run; the speedup interval is Welch's t interval of the log ratio. A comparison is white when the
+p50 per run; the speedup interval is Welch's t interval of the log ratio. A request faster than the settle's
+pace gets enough requests per run to last `min_run_s` (1 s); a sampling speech model's timings compare per second of
+generated audio (`per_audio_second`), as its outputs differ in length. A comparison is white when the
 work or outputs differ (checked on every timed response: tokens or text, media geometry, audio length), a
 side's runs spread more than 5%, the native model ran at another precision than the candidate, or the GPU was
 busy. Timing phases hold the host GPU lock
@@ -91,7 +116,7 @@ trtmc-aiperf-qual plan --environment $E
 trtmc-aiperf-qual matrix --environment $E --output matrix.csv                # exit 1 unless every profile is executable
 trtmc-aiperf-qual run --profile qwen3-0.6b-fp16 --environment $E --out out/qwen3-0.6b-fp16
 trtmc-aiperf-qual run-all --environment $E --out-root out/ --shard 0/2      # host 1 of 2
-trtmc-aiperf-qual summary gb300-1=nvidia@host1:/runs/out gb300-2=nvidia@host2:/runs/out \
+trtmc-aiperf-qual summary gb300-1=user@host1:/path/to/out gb300-2=user@host2:/path/to/out \
     --ssh "ssh -J jump" --output qualification.md --html qualification.html   # remote roots over ssh
 trtmc-aiperf-qual rejudge --environment $E out/*/                           # re-apply the judge, no model runs
 python tools/model_benchmark.py aiperf --environment $E --aiperf-python <venv>/bin/python --out-root out/
@@ -167,4 +192,5 @@ it).
 - Model needing a differently built bundle: `candidate.build` (or `candidate.model_directory`) in
   `config/models/<profile>.yaml`; the report names the bundle it qualified.
 - New machine: a new file under `config/environments/` (paths, Python interpreters, ports, lock, model list,
-  retention); Docker or bare metal only differ in these paths.
+  retention); Docker or bare metal only differ in these paths. A run's own inputs (its ledger and multi-host
+  assignment) stay with that run's results and are passed by path (`run-all --ledger`, `--assignment`).

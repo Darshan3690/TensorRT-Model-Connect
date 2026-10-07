@@ -47,7 +47,6 @@ GREEDY = {"temperature": 0.0, "top_k": 1, "top_p": 1.0, "do_sample": False}
 # at most NEAR_CAPACITY_MAX prompt tokens (native eager prefill memory).
 NEAR_CAPACITY_NEW_TOKENS = 32
 NEAR_CAPACITY_MAX = 16384
-LENGTH_REJECTIONS = ("exceed", "capacity", "exhaust")  # words of TRTMC's prompt-length rejections
 # TRTMC tokenizes the passage itself (it may count a few more tokens than the Hugging Face tokenizer) and a
 # bundle's prefill profile may be shorter than its sequence length: a prompt TRTMC rejects for length is
 # shortened to the longest it accepts (a binary search over the passage length).
@@ -55,7 +54,7 @@ LENGTH_REJECTIONS = ("exceed", "capacity", "exhaust")  # words of TRTMC's prompt
 
 def timed_request(model: Mapping[str, Any], request: Mapping[str, Any]) -> dict[str, Any]:
     """The request Perf times: a sampling text request as its greedy variant, so both sides generate the
-    same tokens (DESIGN.md 4.6); every other request as is."""
+    same tokens; every other request as is."""
     if model["operation"] in TEXT_OPERATIONS and sampled_request(request):
         return {**request, **GREEDY}
     return dict(request)
@@ -118,7 +117,7 @@ def near_capacity_request(environment: Environment, model: Mapping[str, Any], re
             return True
         except RuntimeError as error:  # a length rejection ("exceed(s) the ... capacity / prefill profile",
             message = str(error).lower()  # "exhausted its KV cache")
-            if "backend_rejected_request" not in message or not any(word in message for word in LENGTH_REJECTIONS):
+            if "backend_rejected_request" not in message or not any(word in message for word in absolute.CAPACITY_WORDS):
                 raise
             return False
 
@@ -174,9 +173,27 @@ def probe(service: Mapping[str, Any], operation: str, request: Mapping[str, Any]
         raise RuntimeError(f"probe rejected: {error.read().decode(errors='replace')[-600:]}") from error
 
 
+MAX_RUN_REQUESTS = 2000  # a run of the shortest requests: enough for a stable median, bounded in time
+
+
+def requests_per_run(measurement: Mapping[str, Any], settled: int, settle_s: float) -> int:
+    """The configured requests per run, or as many as the settle's pace (``settled`` requests in ``settle_s``)
+    fits in ``min_run_s``, up to MAX_RUN_REQUESTS."""
+    requests = int(measurement["requests"])
+    if settled and settle_s > 0 and measurement.get("min_run_s"):
+        fitting = math.ceil(float(measurement["min_run_s"]) * settled / settle_s)
+        requests = max(requests, min(MAX_RUN_REQUESTS, fitting))
+    return requests
+
+
+def _audio_seconds(observation: Mapping[str, Any] | None) -> float | None:
+    seconds = ((observation or {}).get("audio_digest") or {}).get("seconds")
+    return float(seconds) if seconds else None
+
+
 def settle(service: Mapping[str, Any], operation: str, request: Mapping[str, Any], seconds: float,
            timeout_s: float) -> int:
-    """The timed request sent back to back for ``seconds`` before a side's first timed run (DESIGN.md 4.6: a
+    """The timed request sent back to back for ``seconds`` before a side's first timed run (a
     fresh server times short requests slower for its first seconds), each within the run deadline ``timeout_s``;
     returns how many were sent."""
     deadline, sent = time.monotonic() + seconds, 0
@@ -246,16 +263,20 @@ def _responses(run: AiperfRun) -> list[tuple[float | None, dict[str, Any] | None
 def _perf_run(environment: Environment, service: Mapping[str, Any], model: Mapping[str, Any], suite: Suite,
               measurement: Mapping[str, Any], out: Path, aggregation: str) -> tuple[AiperfRun, dict[str, Any]]:
     """Repeated timed runs of the suite's request. Each run's statistic is the median server model-call
-    time; every response must carry its time, and every response's work signature is kept."""
-    arguments = [*TASK_ENDPOINT, *_task_url(service, model["operation"]), "--concurrency", "1",
-                 "--input-file", str(suite.write_inputs(out.parent / f"{out.name}.inputs.jsonl")),
-                 "--custom-dataset-type", "single_turn", "--dataset-sampling-strategy", "sequential",
-                 "--request-count", str(measurement["requests"])]
-    if int(measurement.get("warmup", 0)) > 0:
-        arguments += ["--warmup-request-count", str(measurement["warmup"])]
+    time (with ``per_audio_second``, per second of generated audio: a sampling speech model's outputs differ in
+    length); every response must carry its time, and every response's work signature is kept. A request shorter
+    than the settle's pace gets enough requests per run to last ``min_run_s``, so a run's median is not noise."""
     settle_s = float(measurement.get("settle_s", 0))
     settled = (settle(service, model["operation"], suite.samples[0]["request"], settle_s,
                       absolute.run_timeout(environment, model)) if settle_s > 0 else 0)
+    requests = requests_per_run(measurement, settled, settle_s)
+    per_audio_second = bool(measurement.get("per_audio_second"))
+    arguments = [*TASK_ENDPOINT, *_task_url(service, model["operation"]), "--concurrency", "1",
+                 "--input-file", str(suite.write_inputs(out.parent / f"{out.name}.inputs.jsonl")),
+                 "--custom-dataset-type", "single_turn", "--dataset-sampling-strategy", "sequential",
+                 "--request-count", str(requests)]
+    if int(measurement.get("warmup", 0)) > 0:
+        arguments += ["--warmup-request-count", str(measurement["warmup"])]
     # AIPerf 0.13.0's --num-profile-runs breaks endpoints with tokenizes_input: false (trtmc_task);
     # the repetitions run here.
     runs, busy, per_run, work, untimed = [], [], [], [], 0
@@ -264,13 +285,17 @@ def _perf_run(environment: Environment, service: Mapping[str, Any], model: Mappi
         runs.append(run_aiperf(environment, out / f"run_{index:02d}", arguments,
                                timeout_s=absolute.run_timeout(environment, model)))
         responses = _responses(runs[-1])
+        if per_audio_second:
+            responses = [(None if ms is None or not _audio_seconds(obs) else ms / _audio_seconds(obs), obs)
+                         for ms, obs in responses]
         times = [ms for ms, _ in responses if ms is not None]
         untimed += len(responses) - len(times)
         if not times:
             per_run.append(None)
             break  # nothing succeeded; further runs cannot either
         per_run.append(statistics.median(times))
-        work += [judge.work_signature(model["operation"], obs) for _, obs in responses]
+        # Per audio second, the work is the request itself (its generated length is normalized out).
+        work += [() if per_audio_second else judge.work_signature(model["operation"], obs) for _, obs in responses]
     stats = judge.across_runs(per_run, aggregation)
     stats["work"] = list(dict.fromkeys(signature for signature in work if signature is not None))  # distinct
     stats["work_missing"] = sum(signature is None for signature in work)
@@ -278,13 +303,16 @@ def _perf_run(environment: Environment, service: Mapping[str, Any], model: Mappi
     stats["aiperf_exit"] = max(run.exit_code for run in runs)
     if settled:
         stats["settle_requests"] = settled
+    stats["requests_per_run"] = requests
+    if per_audio_second:
+        stats["unit"] = "ms per audio second"
     expected_runs, problems = int(measurement.get("runs", 1)), []
     if len(runs) < expected_runs:
         problems.append(f"{len(runs)} of {expected_runs} runs completed")
     if untimed:
         problems.append(f"{untimed} successful responses carry no model-call time")
     for run in runs:
-        problem = run_completeness(run, int(measurement["requests"]))
+        problem = run_completeness(run, requests)
         if problem:
             problems.append(f"{getattr(getattr(run, 'directory', None), 'name', 'run')}: {problem}")
     if problems:
@@ -373,7 +401,7 @@ CONVERSION_PARITY = "conversion-parity"
 
 
 def conversion_parity(performance: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    """A Perf-only model's Acc evidence (DESIGN.md 4.7): on every timed request TRTMC's output passes the
+    """A Perf-only model's Acc evidence: on every timed request TRTMC's output passes the
     Task's output check against the native eager output (text: the first 8 greedy token ids, or the whole
     text, are equal); a mismatch is a ``fail``. Empty when no eager comparison ran (``missing_results``
     then reports it)."""
@@ -463,7 +491,7 @@ def unavailable_mode(mode: str, reason: str, request: str | None = None) -> dict
 
 class _Phases:
     """Runs phases, recording failures so one failing phase does not hide the others. A phase with
-    ``retries`` runs again after a failure (DESIGN.md Section 9: one retry of a phase that fails before
+    ``retries`` runs again after a failure (one retry of a phase that fails before
     producing its result); ``reset`` undoes a failed attempt's partial results first."""
 
     def __init__(self, out: Path) -> None:
@@ -588,7 +616,7 @@ def _candidate(environment: Environment, model: Mapping[str, Any], l1: Mapping[s
 
 
 def order_check(environment: Environment, model: Mapping[str, Any], out: Path) -> dict[str, Any]:
-    """DESIGN.md 4.6: the model's L1 requests timed twice in both orders (native then TRTMC, TRTMC then native),
+    """The order check: the model's L1 requests timed twice in both orders (native then TRTMC, TRTMC then native),
     against native eager at its timing precision. Each side's order effect is its p50 when timed second relative
     to its p50 when timed first (native after TRTMC vs native first; TRTMC after native vs TRTMC first); a
     request's speedup effect compounds both sides' ratios, each in its worse direction, and ``largest`` is the
@@ -679,7 +707,7 @@ def _bundle_identity(out: Path) -> dict[str, Any] | None:
 
 
 SMOKE_MEASUREMENT = {"warmup": 0, "requests": 1, "runs": 1}
-PHASE_RETRIES = 1  # a GPU phase that fails before producing its result runs once more (DESIGN.md Section 9)
+PHASE_RETRIES = 1  # a GPU phase that fails before producing its result runs once more
 
 
 def retries(environment: Environment) -> int:
@@ -793,7 +821,7 @@ def qualify(model: dict[str, Any], environment: Environment, out: Path) -> dict[
                                           if key in overlapped})
                 native = overlapped.get("native")
                 if native is None:  # the native side on its own: no overlap, or it failed there
-                    native = phases.run("absolute_native", lambda: absolute.run_native(
+                    native = phases.run("absolute_native", lambda: absolute.run_native_alone(
                         environment, model, python, plans, out, probe), retries=retries(environment))
                 if native:
                     phases.errors.pop("absolute_native", None)

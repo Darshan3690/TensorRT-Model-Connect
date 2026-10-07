@@ -91,8 +91,9 @@ def current_settings(model: dict, environment) -> dict:
         current = models.resolve_model(model["catalog_profile"], environment)
     except ConfigError:
         return model
-    gates = {item["suite"]: item.get("gate") for item in current["absolute"]}
-    absolute = [{**item, "gate": gates.get(item["suite"]) or item.get("gate")} for item in model.get("absolute", [])]
+    gates = {item["suite"]: {key: item[key] for key in ("gate", "mismatched_precision_gate") if item.get(key)}
+             for item in current["absolute"]}
+    absolute = [{**item, **gates.get(item["suite"], {})} for item in model.get("absolute", [])]
     judging = ("output_grader", "output_grader_params", "margin_percent", "max_ci_percent", "guard_percent",
                "not_equivalent")
     l1 = {**model["performance"]["l1"],
@@ -206,7 +207,9 @@ def rejudge_reports(outs: Sequence[Path], environment=None) -> int:
             if item.get("source") == "absolute":  # both sides' scores are kept: re-apply today's gate
                 declared = next((entry for entry in model.get("absolute", []) if entry["suite"] == item["suite"]), {})
                 judged = dict(item.get("gate") or {})
-                if environment is not None and declared.get("gate"):
+                # An entry without metrics (a parity check) cannot be re-judged: it keeps the gate it was judged
+                # against, the mismatched-precision one included.
+                if environment is not None and declared.get("gate") and item.get("metrics"):
                     item["gate"] = dict(declared["gate"])
                 if item.get("metrics") and item["status"] != "error":
                     if "counts" in item or "per_problem_regression" in item["metrics"]:  # binary: re-test
@@ -258,6 +261,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                                                       "profiles in its order")
     batch.add_argument("--host", help="this host's name in --assignment")
     batch.add_argument("--rerun", action="store_true", help="rerun profiles that already have a result")
+    batch.add_argument("--ledger", type=Path, help="this run's ledger (JSON: profile -> predicted seconds): each AIPerf "
+                                                   "run's deadline is three times its profile's time, at least ten "
+                                                   "minutes (default: 12 hours)")
     batch.add_argument("--smoke", action="store_true", help="smoke mode (results under <out-root>/smoke)")
     batch.add_argument("--no-prefetch", action="store_true",
                        help="do not download the next checkpoint during a run (lower disk peak)")
@@ -270,11 +276,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                        help="result roots of a previous run: TRTMC p50 slower by >5%% is noted as a regression")
     merge.add_argument("--html", type=Path, help="also write a failure-first HTML report here (remote evidence "
                                                    "is fetched next to it)")
+    merge.add_argument("--title", default="TRTMC vs native qualification", help="the HTML report's title")
+    merge.add_argument("--link", action="append", default=[], metavar="LABEL=HREF",
+                       help="a related page linked under the HTML report's title (for example an appendix)")
+    merge.add_argument("--appendix", action="append", default=[], type=Path, metavar="ROOT",
+                       help="result roots of reruns (an appendix): each rerun profile's result is shown under its "
+                            "reason in the HTML report; the matrix itself stays as run")
     merge.add_argument("--assignment", type=Path, help="a formal multi-host run: refuse to merge unless the roots "
                                                       "pass merge-check against this assignment")
     merge.add_argument("--smoke", action="store_true", help="with --assignment: the roots hold smoke results")
-    split = commands.add_parser("assign", help="freeze the formal run's profile -> host assignment from a ledger "
-                                               "(DESIGN.md Section 9)")
+    split = commands.add_parser("assign", help="freeze the formal run's profile -> host assignment from a ledger")
     split.add_argument("--environment", type=Path, required=True)
     split.add_argument("--profile", action="append", help="only these profiles")
     split.add_argument("--ledger", type=Path, required=True, help="JSON: profile -> predicted seconds")
@@ -289,13 +300,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                                             "(and its exclusions)")
     plan.add_argument("--environment", type=Path, required=True)
     plan.add_argument("--profile", action="append", help="only these profiles")
-    order = commands.add_parser("order-check", help="time each profile's L1 requests in both orders (DESIGN.md "
-                                                    "4.6): the order effect before a formal run")
+    order = commands.add_parser("order-check", help="time each profile's L1 requests in both orders: the order "
+                                                    "effect before a formal run")
     order.add_argument("--environment", type=Path, required=True)
     order.add_argument("--profile", action="append", required=True)
     order.add_argument("--out-root", type=Path, required=True, help="<out-root>/<profile>/order.json")
-    matrix = commands.add_parser("matrix", help="the execution matrix (DESIGN.md Section 7): one CSV row per ready "
-                                                "profile with its native path, environment, workloads, and checks")
+    matrix = commands.add_parser("matrix", help="the execution matrix: one CSV row per ready profile with its "
+                                                "native path, environment, workloads, and checks")
     matrix.add_argument("--environment", type=Path, required=True)
     matrix.add_argument("--profile", action="append", help="only these profiles")
     matrix.add_argument("--output", type=Path, help="write the CSV here instead of stdout")
@@ -337,7 +348,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if arguments.command == "summary":
             import tempfile
 
-            from .campaign import fetch_roots, summary
+            from .campaign import fetch_roots, run_context, summary
 
             with tempfile.TemporaryDirectory(prefix="trtmc-aiperf-summary-") as fetched:
                 store = arguments.html.parent / f"{arguments.html.stem}-evidence" if arguments.html else Path(fetched)
@@ -359,7 +370,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                     rows, _, rank = collect(roots)
                     if baseline:
                         annotate_regressions(rows, collect(baseline)[0])
-                    render(rows, counts, rank, arguments.html)
+                    links = [tuple(link.split("=", 1)) for link in arguments.link]
+                    if any(len(link) != 2 for link in links):
+                        print("trtmc-aiperf-qual: --link takes LABEL=HREF", file=sys.stderr)
+                        return 2
+                    from .campaign import signal
+
+                    reruns = {profile: signal(row) for profile, row in collect(arguments.appendix)[0].items()
+                              if profile in rows} if arguments.appendix else {}
+                    render(rows, counts, rank, arguments.html, title=arguments.title, context=run_context(roots),
+                           links=links, reruns=reruns)
             if arguments.output:
                 arguments.output.write_text(text)
                 print(json.dumps(dict(counts)))
@@ -368,6 +388,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         environment = load_environment(arguments.environment)
         environment.values["environment_file"] = str(arguments.environment.resolve())  # for reproduction commands
+        if getattr(arguments, "ledger", None):
+            environment.values["run_ledger"] = str(arguments.ledger.resolve())
         if getattr(arguments, "smoke", False):
             environment.values["smoke"] = True
         if environment.values.get("hf_hub_cache"):  # tokenizers loaded here use the managed cache too

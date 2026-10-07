@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Qualification defaults per catalog Task (DESIGN.md). Every catalog model inherits the entry of its Task;
+# Qualification defaults per catalog Task. Every catalog model inherits the entry of its Task;
 # config/models/<profile>.yaml holds only the exceptions (deep-merged over this).
 #
 # Acc: TRTMC and the native model answer the Task's gold-labelled benchmarks (`absolute`, below); each is a
@@ -21,11 +21,13 @@ defaults:
       suite: catalog
       reference_modes: [eager]
       # settle_s: the request sent back to back first (a fresh server times short requests slower at first).
-      measurement: {settle_s: 10, warmup: 3, requests: 12, runs: 5}
+      # min_run_s: a request faster than the settle's pace gets enough requests per run to last this long (12
+      # sub-millisecond requests spread their run's median by more than max_ci_percent).
+      measurement: {settle_s: 10, warmup: 3, requests: 12, runs: 5, min_run_s: 1.0}
       aggregation: {candidate: mean, eager: mean, compile: best}
       margin_percent: 5
       # The green / red bounds widen by this (multiplicatively): the largest speedup effect of server instances and
-      # timing order that the order check measured on the formal hosts (DESIGN.md 4.6; October 2026: 11.4%).
+      # timing order that the order check measured on the formal hosts (October 2026: 11.4%).
       guard_percent: 12
       max_ci_percent: 5
 
@@ -37,6 +39,10 @@ benchmarks:
   # MMLU 0-shot (AIPerf mmlu, pinned): 40 per subject (<= 2,280); margin 1 point.
   mmlu: {plugin: trtmc_mmlu, suite: mmlu-0shot, n_shots: 0, per_task: 40, min_native: 30.0,
          gate: {margin: 1.0}, quantized_gate: {margin: 2.0}, sampled_gate: {margin: 2.0}}
+  # GSM8K (AIPerf gsm8k, pinned; the number after #### or the last number): for math models only, as their
+  # answers (up to 256 tokens) dominate the run time; at most 500 problems; margin 2 points.
+  gsm8k: {plugin: trtmc_gsm8k, suite: gsm8k, limit: 500, min_native: 10.0,
+          gate: {margin: 2.0}, quantized_gate: {margin: 3.0}, sampled_gate: {margin: 3.0}}
   # LAMBADA (OpenAI, all 5,153 passages): base LMs too small for MMLU to discriminate.
   lambada: {plugin: trtmc_lambada, suite: lambada, endpoint: completions, min_native: 10.0,
             gate: {margin: 0.5}, quantized_gate: {margin: 1.0}, sampled_gate: {margin: 1.0}}
@@ -62,7 +68,10 @@ benchmarks:
   # Raw encoders (BERT, RoBERTa, ...: STS-B is not their task): conversion parity of the encode output (the
   # first-token hidden state) on 400 STS-B test sentences, every sentence within the tolerance.
   encoder_parity: {suite: encoder-parity, suite_definition: stsbenchmark-sentences-400, metric: vector_parity,
-                   gate: {min_cosine: 0.999, max_relative_l2: 0.02}}
+                   gate: {min_cosine: 0.999, max_relative_l2: 0.02},
+                   # A native model that cannot run the candidate's precision (fp16) runs at fp32: TRTMC's half-
+                   # precision error is then not shared by the reference, so the tolerance doubles.
+                   mismatched_precision_gate: {min_cosine: 0.998, max_relative_l2: 0.04}}
   # SciFact reranking of fixed BM25 top-20 candidates (nDCG@10). Each document keeps its head so that the pair, as
   # the bundle's reranker forms it (`pair_format`, the eagle_vlm runtime's), fits the bundle; both sides get it.
   rerank: {suite: scifact-rerank, suite_definition: scifact-rerank-bm25-300, metric: rerank_ndcg, gate: {margin: 1.0},
@@ -113,7 +122,7 @@ benchmarks:
   speech_parity: {suite: speech-parity, suite_definition: librispeech-test-clean-speech-20, metric: audio_parity,
                   gate: {min_duration_ratio: 0.8, max_duration_ratio: 1.2, min_rms_ratio: 0.5, max_rms_ratio: 2.0,
                          max_log_spectral_distance: 3.0}}
-  # HumanEval and MBPP completions run against their unit tests (as nobody, CPU/memory/time limits, DESIGN.md 8);
+  # HumanEval and MBPP completions run against their unit tests (as nobody, with CPU, memory, and time limits);
   # prompts that leave fewer than 64 tokens to generate on the bundle are dropped for both sides.
   code: {suite: code, suite_definition: code-humaneval-mbpp-664, metric: code_pass, fit_prompt: true,
          min_new_tokens: 64, min_native: 5.0, gate: {margin: 2.0}}

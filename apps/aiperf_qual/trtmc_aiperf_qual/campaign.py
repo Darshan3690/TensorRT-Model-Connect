@@ -28,8 +28,9 @@ from typing import Any, Mapping, Sequence
 from . import bundles, retention
 from .bundles import prefetch
 from .config import Environment
+from .judge import QUALIFYING_MODE
 from .models import checkpoints
-from .report import counted
+from .report import acc_value, plain
 from .services import reference_python
 
 KEPT_ASIDE = re.compile(r"\.\d{10}$")  # <profile>.<unix time> of a previous run
@@ -294,6 +295,18 @@ def write_exclusions(out_root: Path, excluded: Sequence[Mapping[str, Any]]) -> N
     (out_root / EXCLUSIONS).write_text(json.dumps(list(excluded), indent=2) + "\n")
 
 
+def _precision(report: Mapping[str, Any], directory: Path) -> dict[str, str | None]:
+    """Each side's precision: TRTMC's from the bundle the run built, the native model's as timed (else as it
+    answered the benchmarks)."""
+    model = directory / "model.json"
+    trtmc = (json.loads(model.read_text()).get("candidate") or {}).get("precision") if model.is_file() else None
+    native = next((precision for precision in [*((item.get("reference") or {}).get("precision")
+                                                for item in report.get("performance_l1", [])),
+                                               *((item.get("native") or {}).get("precision")
+                                                 for item in report.get("accuracy", []))] if precision), None)
+    return {"trtmc": trtmc, "native": native}
+
+
 def _row(directory: Path) -> dict[str, Any] | None:
     """The result in a profile directory; ``time`` is when that run started (re-judging rewrites reports,
     so a report's own start time, else the file time)."""
@@ -304,6 +317,7 @@ def _row(directory: Path) -> dict[str, Any] | None:
         value = json.loads(path.read_text())
         if name == "report.json":
             return {"task": value.get("task"), "category": value["verdict"]["category"],
+                    "precision": _precision(value, directory),
                     "directory": str(directory), "repro": value.get("repro"), "l2": value.get("performance_l2"),
                     "time": float(value.get("started") or path.stat().st_mtime),
                     "accuracy": value.get("accuracy", []), "perf": value.get("performance_l1", []),
@@ -320,18 +334,112 @@ def _row(directory: Path) -> dict[str, Any] | None:
 
 
 def _accuracy_text(items: Sequence[Mapping[str, Any]]) -> str:
-    def one(item: Mapping[str, Any]) -> str:
-        extra = ", informational" if item.get("informational") else ""
-        need = (f"need {item['required_passes']}" if item.get("required_passes") is not None
-                else f"gate {json.dumps(item.get('gate', {}))}")
-        status = f"{item['status']} " if item.get("status") else ""
-        return f"{item['suite']} {status}{counted(item)} ({need}{extra})"
-    return "; ".join(one(item) for item in items)
+    return "; ".join(acc_value(item) for item in items if not item.get("informational"))
 
 
-def _perf_text(items: Sequence[Mapping[str, Any]]) -> str:
-    return ", ".join(f"{item['reference_mode']}{'/' + item['request'] if item.get('request') else ''} {item['light']}"
-                     + (f" {item['speedup']:.2f}x" if item.get("speedup") else "") for item in items)
+def ms(value: Any) -> str:
+    if not isinstance(value, (int, float)):
+        return "—"
+    return f"{value:.0f} ms" if value >= 100 else f"{value:.1f} ms" if value >= 1 else f"{value:.3f} ms"
+
+
+def _perf_text(profile: str, items: Sequence[Mapping[str, Any]]) -> str:
+    return "; ".join(f"{request_label(profile, item)}: TRTMC {ms((item.get('candidate') or {}).get('p50_ms'))} · "
+                     f"native {ms((item.get('reference') or {}).get('p50_ms'))}"
+                     + (" per audio second" if (item.get("candidate") or {}).get("unit") else "") for item in items)
+
+
+# The owner's four results, worst first: White, no valid comparison (no verdict: an error or a failed build; or the
+# comparison does not apply: the native model below a benchmark's floor, a Task without an Acc check, timings that
+# cannot be compared); Red, Acc or Perf worse than the native model beyond its margin; Yellow, Perf about equal
+# (counts as a pass) or an Acc difference not shown either way; Green, a pass.
+SIGNALS = ("white", "red", "yellow", "green")
+SIGNAL_NAMES = {"white": "White", "red": "Red", "yellow": "Yellow", "green": "Green"}
+NO_VERDICT = {"error", "config-error", "build-failed", "not-run", "excluded", "smoke-fail"}
+NOT_COMPARED = {"not-comparable", "not-covered"}
+
+
+def reported_perf(row: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    """The timed requests the results report: the catalog's own against the eager native model (the near-capacity
+    request, owner's choice for now, and torch.compile timings, informational, stay in the evidence)."""
+    return [item for item in row.get("perf", []) if "near-capacity" not in str(item.get("request") or "")
+            and item.get("reference_mode", QUALIFYING_MODE) == QUALIFYING_MODE]
+
+
+def request_label(profile: str, item: Mapping[str, Any]) -> str:
+    """A timed request named without its model (``catalog``, ``catalog-en``)."""
+    name = str(item.get("request") or item.get("reference_mode") or "")
+    return name[len(profile) + 1:] if name.startswith(profile + "-") else name
+
+
+def _judged(row: Mapping[str, Any], status: str) -> list[Mapping[str, Any]]:
+    return [item for item in row.get("accuracy", []) if item.get("status") == status and not item.get("informational")]
+
+
+def signal(row: Mapping[str, Any]) -> str:
+    """The row's result among ``SIGNALS``."""
+    category = row["category"]
+    if category in NO_VERDICT:
+        return "white"
+    perf = reported_perf(row)
+    lights = [item.get("light") for item in perf]
+    if category == "acc-issue" or _judged(row, "fail") or "red" in lights:
+        return "red"
+    if category in NOT_COMPARED or "white" in lights or (category == "perf-inconclusive" and not perf):
+        return "white"
+    if category == "acc-inconclusive" or "yellow" in lights:
+        return "yellow"
+    return "green"
+
+
+def signal_reason(profile: str, row: Mapping[str, Any]) -> str:
+    """Why the row is not Green, in one plain sentence per benchmark or request."""
+    result, perf = signal(row), reported_perf(row)
+    if result == "green":
+        return plain(row.get("notes", ""))[:300]
+    if row["category"] in NO_VERDICT:
+        errors = [str(item.get("error") or "; ".join(item.get("reasons", []))) for item in _judged(row, "error")]
+        return plain(next((text for text in [row.get("notes", ""), *errors] if text), row["category"]))[:300]
+    parts: list[str] = []
+    if result == "red":
+        for item in _judged(row, "fail"):
+            why = ("TRTMC worse than native beyond the margin" if "trtmc_score" in (item.get("metrics") or {})
+                   else "; ".join(item.get("reasons", [])) or "failed")
+            parts.append(f"{item['suite']}: {why}" + "".join(f" ({plain(note)})" for note in item.get("notes", [])))
+        parts += [f"{request_label(profile, item)}: TRTMC slower than native" for item in perf if item.get("light") == "red"]
+    elif result == "white":
+        parts += [f"{item['suite']}: {plain('; '.join(item.get('reasons', [])))}"
+                  for status in ("not-comparable", "not-covered") for item in _judged(row, status)]
+        parts += [f"{request_label(profile, item)}: timings not comparable ({plain((item.get('reasons') or [''])[0])})"
+                  for item in perf if item.get("light") == "white"]
+    else:
+        parts += [f"{item['suite']}: difference not shown either way" for item in _judged(row, "inconclusive")]
+        parts += [f"{request_label(profile, item)}: TRTMC about equal to native" for item in perf
+                  if item.get("light") == "yellow"]
+    notes = plain(row.get("notes", ""))  # coverage, a regression against a baseline
+    return "; ".join(part for part in [*parts, notes] if part)[:400] or row["category"]
+
+
+def run_context(roots: Sequence[Path]) -> str:
+    """Which run the roots hold: each root's host, the assignment and campaign inputs it ran under (``plan.json``),
+    and when its first and last results started."""
+    import datetime
+    import hashlib
+
+    def day(stamp: float) -> str:
+        return datetime.datetime.fromtimestamp(stamp, datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+    parts = []
+    for root in roots:
+        plan = json.loads((root / PLAN).read_text()) if (root / PLAN).is_file() else {}
+        times = [row["time"] for row in (_row(path) for path in root.iterdir() if path.is_dir()) if row]
+        inputs = plan.get("inputs")
+        digest = hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()[:12] if inputs else ""
+        parts.append(f"{root.name}: host {plan.get('host') or '-'}"
+                     + (f", assignment {str(plan['assignment'])[:12]}" if plan.get("assignment") else "")
+                     + (f", campaign inputs {digest}" if digest else "")
+                     + (f", {day(min(times))} to {day(max(times))}" if times else ""))
+    return " · ".join(parts)
 
 
 def collect(roots: Sequence[Path]) -> tuple[dict[str, dict[str, Any]], collections.Counter, dict[str, int]]:
@@ -386,27 +494,32 @@ def summary(roots: Sequence[Path], baseline: Sequence[Path] = ()) -> tuple[str, 
     rows, counts, rank = collect(roots)
     if baseline:
         annotate_regressions(rows, collect(baseline)[0])
-    shown = sorted(counts, key=rank.get)
+    results = collections.Counter(signal(row) for row in rows.values())
     by_task: dict[str, collections.Counter] = collections.defaultdict(collections.Counter)
     for row in rows.values():
-        by_task[row["task"] or "-"][row["category"]] += 1
-    lines = ["# TRTMC vs native qualification", "", f"{len(rows)} models from {', '.join(r.name for r in roots)}.",
-             "", "| category | models |", "|---|---|", *(f"| {c} | {counts[c]} |" for c in shown),
-             "", "## By Task", "", "| Task | " + " | ".join(shown) + " |", "|---|" + "---|" * len(shown),
-             *(f"| {task} | " + " | ".join(str(by_task[task].get(c) or "") for c in shown) + " |"
+        by_task[row["task"] or "-"][signal(row)] += 1
+    names = [SIGNAL_NAMES[result] for result in SIGNALS]
+    lines = ["# TRTMC vs native qualification", "", f"{len(rows)} models from {', '.join(r.name for r in roots)}: "
+             f"{results['green'] + results['yellow']} pass (Green + Yellow).", "",
+             "Green: pass. Yellow: Perf about equal to native (counts as a pass) or an Acc difference not shown either "
+             "way. Red: Acc or Perf worse than native beyond its margin. White: no valid comparison (an error or a "
+             "failed build, or the comparison does not apply).", "",
+             "| result | models |", "|---|---|", *(f"| {SIGNAL_NAMES[r]} | {results[r]} |" for r in SIGNALS),
+             "", "## By Task", "", "| Task | " + " | ".join(names) + " |", "|---|" + "---|" * len(names),
+             *(f"| {task} | " + " | ".join(str(by_task[task].get(r) or "") for r in SIGNALS) + " |"
                for task in sorted(by_task)),
-             "", "## Per model", "", "| model | Task | root | category | Acc | Perf L1 (speedup vs native) | "
-             "reference | notes |", "|---|---|---|---|---|---|---|---|"]
-    for profile in sorted(rows, key=lambda p: (rank[rows[p]["category"]], rows[p]["task"] or "", p)):
+             "", "## Per model", "", "| result | model | Task | host | Acc (TRTMC · native) | Perf p50 (TRTMC · native) | "
+             "reason |", "|---|---|---|---|---|---|---|"]
+    for profile in sorted(rows, key=lambda p: (SIGNALS.index(signal(rows[p])), rows[p]["task"] or "", p)):
         row = rows[profile]
-        notes = row["notes"].replace("|", "/").replace("\n", " ")
-        lines.append(f"| {profile} | {row['task'] or '-'} | {row['root']} | {row['category']} | "
-                     f"{_accuracy_text(row['accuracy'])} | {_perf_text(row['perf'])} | {row['backend']} | {notes} |")
+        reason = signal_reason(profile, row).replace("|", "/").replace("\n", " ")
+        lines.append(f"| {SIGNAL_NAMES[signal(row)]} | {profile} | {row['task'] or '-'} | {row['root']} | "
+                     f"{_accuracy_text(row['accuracy'])} | {_perf_text(profile, reported_perf(row))} | {reason} |")
     return "\n".join(lines) + "\n", counts
 
 
 REMOTE_ROOT = re.compile(r"^(?:(?P<name>[\w.-]+)=)?(?P<host>[\w.@-]+):(?P<path>/.*)$")
-RESULT_FILES = ("report.json", "build.json", "error.json", EXCLUSIONS, PLAN)
+RESULT_FILES = ("report.json", "model.json", "build.json", "error.json", EXCLUSIONS, PLAN)  # model: its precision
 EVIDENCE_FILES = ("report.md", "phase-errors.log", "build.log", "error.log", "server.log", "result.json")
 MAX_EVIDENCE_BYTES = "5M"
 

@@ -230,15 +230,17 @@ def test_summary_merges_result_roots(tmp_path):
     (first / "report.json").write_text(json.dumps({
         "task": "text_generation", "verdict": {"category": "pass"},
         "accuracy": [{"suite": "mmlu", "passed": 10, "samples": 10, "required_passes": 9}],
-        "performance_l1": [{"reference_mode": "eager", "light": "green", "speedup": 2.5}]}))
+        "performance_l1": [{"reference_mode": "eager", "light": "green", "speedup": 2.5,
+                            "candidate": {"p50_ms": 4.0}, "reference": {"p50_ms": 10.0}}]}))
     failed = tmp_path / "gb300-2/b"
     failed.mkdir(parents=True)
     (failed / "build.json").write_text(json.dumps({"task": "classification", "status": "failed",
                                                    "reason": "error: checkpoint is gated"}))
     text, counts = campaign.summary([tmp_path / "gb300-1", tmp_path / "gb300-2"])
     assert counts == {"pass": 1, "build-failed": 1}
-    assert "| a | text_generation | gb300-1 | pass | mmlu 10/10 (need 9) | eager green 2.50x |" in text
-    assert "| b | classification | gb300-2 | build-failed |" in text and "checkpoint is gated" in text
+    assert "| Green | a | text_generation | gb300-1 | mmlu: 10/10 within tolerance | eager: TRTMC 4.0 ms · native 10.0 ms |" in text
+    assert "| White | b | classification | gb300-2 |" in text and "checkpoint is gated" in text
+    assert "1 pass (Green + Yellow)" in text and "| White | 1 |" in text
 
 
 CATALOG = [selection.Profile("qwen3-0.6b-fp16", "text_generation", "Qwen/Qwen3-0.6B", None),
@@ -298,7 +300,7 @@ def test_summary_lists_excluded_models_unless_a_result_exists(tmp_path):
     (other / "report.json").write_text(json.dumps({"task": "text_generation", "verdict": {"category": "pass"}}))
     text, counts = campaign.summary([tmp_path / "gb300-2", root])
     assert counts == {"pass": 1, "excluded": 1}
-    assert "| flux-2-dev | image_generation | gb300-1 | excluded |" in text and "80 GB GPU" in text
+    assert "| White | flux-2-dev | image_generation | gb300-1 |" in text and "80 GB GPU" in text
 
 
 def test_preflight_reports_missing_paths_and_interpreters(tmp_path):
@@ -331,11 +333,13 @@ def test_summary_fetches_remote_result_roots_over_ssh(tmp_path):
     remote = tmp_path / "remote/results"
     (remote / "a").mkdir(parents=True)
     (remote / "a/report.json").write_text(json.dumps({"task": "classification", "verdict": {"category": "pass"}}))
+    (remote / "a/model.json").write_text(json.dumps({"candidate": {"precision": "fp16"}}))
     (remote / "a/big.bin").write_bytes(b"x" * 1000)  # only result files are fetched
     roots = campaign.fetch_roots([f"gb300-1=nvidia@host:{remote}"], str(fake_ssh), tmp_path / "fetched")
     assert roots == [tmp_path / "fetched/gb300-1"] and not (roots[0] / "a/big.bin").exists()
+    assert campaign.collect(roots)[0]["a"]["precision"]["trtmc"] == "fp16"  # the model's precision came along
     text, counts = campaign.summary(roots)
-    assert counts == {"pass": 1} and "| a | classification | gb300-1 | pass |" in text
+    assert counts == {"pass": 1} and "| Green | a | classification | gb300-1 |" in text
     local = tmp_path / "local-root"
     local.mkdir()
     assert campaign.fetch_roots([str(local)], str(fake_ssh), tmp_path / "fetched") == [local]
@@ -374,7 +378,7 @@ def test_summary_keeps_the_latest_result_of_a_profile_run_on_several_roots(tmp_p
             {"task": "image_generation", "started": started, "verdict": {"category": category}}))
     for order in ([tmp_path / "gb300-1", tmp_path / "gb300-2"], [tmp_path / "gb300-2", tmp_path / "gb300-1"]):
         text, counts = campaign.summary(order)
-        assert counts == {"acc-issue": 1} and "| m | image_generation | gb300-1 | acc-issue |" in text
+        assert counts == {"acc-issue": 1} and "| Red | m | image_generation | gb300-1 |" in text
 
 
 def test_summary_counts_every_planned_profile(tmp_path):
@@ -384,7 +388,7 @@ def test_summary_counts_every_planned_profile(tmp_path):
     (root / "a/report.json").write_text(json.dumps({"task": "t", "started": 1.0, "verdict": {"category": "pass"}}))
     text, counts = campaign.summary([root])
     assert counts == {"pass": 1, "not-run": 1, "config-error": 1}
-    assert "| b | - | gb300-1 | not-run |" in text and "no Task defaults" in text
+    assert "| White | b | - | gb300-1 |" in text and "no Task defaults" in text
 
 
 def test_run_all_exit_code_reports_harness_failures():
@@ -418,9 +422,57 @@ def test_html_report_lists_failures_first_with_evidence(tmp_path):
                                                               "explanation": "answer differs", "actual": "B",
                                                               "expected": "C"}]}]}))
     rows, counts, rank = campaign.collect([root])
-    page = render(rows, counts, rank, tmp_path / "report.html").read_text()
+    page = render(rows, counts, rank, tmp_path / "report.html", context=campaign.run_context([root]),
+                  links=[("Reruns", "reruns/report.html")], reruns={"bad": "green"}).read_text()
+    assert '<a href="reruns/report.html">Reruns</a>' in page and "<th>Rerun</th>" in page
     assert page.index(">bad<") < page.index(">good<") and "answer differs" in page
     assert 'href="gb300-1/bad/report.md"' in page and "trtmc-aiperf-qual run --profile bad" in page
+    bad = page[page.index(">bad<"):page.index(">good<")]
+    assert "<span class='signal signal-green'><span class='light'></span>Green</span>" in bad  # the rerun's result
+    assert "data-result='red' data-k='bad" in page and "<span>s</span><strong>1/2</strong>" in bad  # values only
+    assert "<div class='detail'>Acc outside tolerance</div>" in page  # a short label; the reason is in the evidence
+    assert "gb300-1: host -" in page and "Models <strong>2</strong>" in page
+    assert "<span class='signal signal-yellow' title='Yellow'><span class='light'></span></span><strong>1</strong>" in page
+    assert "Pass rate <strong>50.0%</strong>" in page  # Green + Yellow of every model
+    legend = page[page.index("<dl class='legend'>"):page.index("</dl>")]
+    assert legend.count("<div><dt>") == 4  # one line per result
+
+
+def test_html_pass_rate_counts_green_and_yellow_of_every_model(tmp_path):
+    from trtmc_aiperf_qual.report_html import render
+
+    categories = {"g": "pass", "y": "acc-inconclusive", "r": "acc-issue", "w": "error"}
+    rows = {name: {"category": category, "task": "t", "accuracy": [], "perf": [], "root": "h"}
+            for name, category in categories.items()}
+    page = render(rows, {}, {}, tmp_path / "report.html").read_text()
+    green, yellow = (f"<span class='signal signal-{result}' title='{result.title()}'><span class='light'></span></span>"
+                     for result in ("green", "yellow"))
+    assert f"Pass {green}<span class='none'>+</span>{yellow}<strong>2</strong>" in page  # lights, not words
+    assert "Pass rate <strong>50.0%</strong>" in page and "Valid comparisons <strong>3 / 4</strong>" in page
+    assert "Pass rate <strong>—</strong>" in render({}, {}, {}, tmp_path / "empty.html").read_text()
+
+
+def test_html_labels_say_in_a_few_words_why_a_result_is_not_green():
+    from trtmc_aiperf_qual.report_html import _issue
+
+    def timed(reason):
+        return {"category": "perf-inconclusive", "accuracy": [], "perf": [{"light": "white", "reasons": [reason]}]}
+
+    assert _issue("m", timed("TRTMC CI ±5.54% > 5.0%"), "white") == "Perf TRTMC CI ±5.54%"
+    assert _issue("m", timed("reference timed at bf16, TRTMC runs fp16"), "white") == "Perf precision differs"
+    assert _issue("m", timed("work differs: TRTMC [...] vs native [...]"), "white") == "Perf outputs differ"
+    assert _issue("m", timed("TRTMC: 1 responses report no work"), "white") == "Perf work not reported"
+    assert _issue("m", timed("native: no work evidence"), "white") == "Perf work not reported"
+    scored = {"category": "acc-issue", "perf": [], "accuracy": [{"status": "fail", "metrics": {"trtmc_score": 1.0}}]}
+    assert _issue("m", scored, "red") == "Acc below native"
+    parity = {"category": "acc-issue", "perf": [], "accuracy": [{"status": "fail", "passed": 398, "samples": 400}]}
+    assert _issue("m", parity, "red") == "Acc outside tolerance"
+    unfit = {"category": "error", "perf": [], "accuracy": [
+        {"status": "error", "error": "no lambada problem fits the bundle's 32-token sequence length"}]}
+    assert _issue("m", unfit, "white") == "no problem fits the bundle"
+    gated = {"category": "build-failed", "accuracy": [], "perf": [], "notes": "checkpoint: 403 Client Error"}
+    assert _issue("m", gated, "white") == "HTTP 403"
+    assert _issue("m", {"category": "not-covered", "accuracy": [], "perf": []}, "white") == "not covered"
 
 
 def test_aggregate_results_report_metrics_not_a_zero_pass_count():
@@ -711,3 +763,31 @@ def test_perf_is_white_when_the_native_model_ran_at_another_precision():
 def test_long_prompts_are_not_taken_for_asset_paths(tmp_path):
     long_prompt = "Context filler. " * 100
     assert bundles._absolute_assets([{"prompt": long_prompt}], tmp_path) == [{"prompt": long_prompt}]
+
+
+def test_results_follow_the_owners_four_colours_on_the_catalog_request():
+    def row(category, lights, acc=()):
+        return {"category": category, "accuracy": list(acc),
+                "perf": [{"request": f"m-{name}", "light": light} for name, light in lights.items()]}
+
+    green = {"catalog": "green"}
+    assert campaign.signal(row("pass", green)) == "green"
+    assert campaign.signal(row("perf-issue", {"catalog": "green", "catalog-near-capacity": "yellow"})) == "green"
+    assert campaign.signal(row("perf-issue", {"catalog": "yellow"})) == "yellow"  # about equal: a pass
+    assert campaign.signal(row("perf-issue", {"catalog": "red"})) == "red"
+    assert campaign.signal(row("perf-inconclusive", {"catalog": "white"})) == "white"
+    assert campaign.signal(row("acc-inconclusive", green)) == "yellow"
+    assert campaign.signal(row("acc-issue", green)) == "red"
+    assert campaign.signal(row("not-comparable", green)) == "white"
+    assert campaign.signal(row("error", green)) == "white" and campaign.signal(row("build-failed", {})) == "white"
+    assert campaign.signal(row("smoke-fail", green)) == "white"
+    wer = {"suite": "librispeech", "status": "fail", "metrics": {"trtmc_score": 50.0, "native_score": 10.0}}
+    assert campaign.signal_reason("m", row("acc-issue", green, [wer])) == "librispeech: TRTMC worse than native beyond the margin"
+    informational = {"suite": "replay", "status": "fail", "informational": True}
+    assert campaign.signal(row("pass", green, [informational])) == "green"
+    compiled = row("pass", green)
+    compiled["perf"].append({"request": "m-catalog", "light": "red", "reference_mode": "compile"})
+    assert campaign.signal(compiled) == "green"  # torch.compile timings are informational
+    shown = campaign.reported_perf(row("pass", {"catalog": "green", "catalog-near-capacity": "red"}))
+    assert [campaign.request_label("m", item) for item in shown] == ["catalog"]
+    assert campaign.signal_reason("m", row("perf-issue", {"catalog": "yellow"})) == "catalog: TRTMC about equal to native"
