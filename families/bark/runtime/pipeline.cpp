@@ -18,6 +18,7 @@
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 
 namespace trtmc {
@@ -197,8 +198,8 @@ namespace {
 static const trtmc::internal::ConfigField bark_config_fields[] = {
     {"max_new_tokens", trtmc::internal::ConfigKind::I64,
      trtmc::internal::ConfigValue{std::int64_t{768}}, "Maximum semantic generation tokens"},
-    {"seed", trtmc::internal::ConfigKind::I64,
-     trtmc::internal::ConfigValue{std::int64_t{-1}}, "Generation seed override"},
+    {"seed", trtmc::internal::ConfigKind::I64, trtmc::internal::ConfigValue{std::int64_t{-1}},
+     "Generation seed override"},
 };
 } // namespace
 
@@ -234,15 +235,23 @@ trtmc::internal::AudioResult BarkPipeline::run(const trtmc::internal::TextToAudi
     int32_t max_tokens = 768;
     const auto max_new =
         trtmc::internal::config_get<std::int64_t>(config, bark_config_fields, "max_new_tokens");
-    if (max_new && *max_new > 0) {
+    if (max_new) {
+        if (*max_new <= 0 || *max_new > std::numeric_limits<int32_t>::max()) {
+            throw trtmc::internal::ConfigError(
+                "Bark: max_new_tokens must be positive and fit in int32_t");
+        }
         max_tokens = static_cast<int32_t>(*max_new);
     }
 
-    int32_t request_seed = -1;
+    int64_t request_seed = -1;
     const auto req_seed =
         trtmc::internal::config_get<std::int64_t>(config, bark_config_fields, "seed");
     if (req_seed) {
-        request_seed = static_cast<int32_t>(*req_seed);
+        if (*req_seed < -1) {
+            throw trtmc::internal::ConfigError(
+                "Bark: seed must be non-negative or -1 to use default seed");
+        }
+        request_seed = *req_seed;
     }
 
     // Tokenize the prompt
@@ -268,7 +277,6 @@ trtmc::internal::AudioResult BarkPipeline::run(const trtmc::internal::TextToAudi
         out.channels = 1;
         return out;
     }
-
 
     // Stage 2: Semantic -> Coarse acoustic codes
     auto coarse_tokens = run_coarse(semantic_tokens);

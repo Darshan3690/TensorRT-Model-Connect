@@ -29,8 +29,7 @@ namespace trtmc {
 
 class BarkSampler;
 
-class BarkPipeline final : public trtmc::internal::IModel,
-                           public trtmc::internal::ITextToAudio {
+class BarkPipeline final : public trtmc::internal::IModel, public trtmc::internal::ITextToAudio {
   public:
     BarkPipeline(std::unique_ptr<ITrtModule> semantic, std::unique_ptr<ITrtModule> coarse,
                  std::unique_ptr<BarkInferenceState> semantic_state,
@@ -49,9 +48,8 @@ class BarkPipeline final : public trtmc::internal::IModel,
 
     // ITextToAudio — was: audio_generation / generate_audio
     // Accepts a free-text prompt; returns PCM audio at the family's declared sample rate.
-    trtmc::internal::AudioResult run(
-        const trtmc::internal::TextToAudioRequest& request,
-        trtmc::internal::ConfigView config) override;
+    trtmc::internal::AudioResult run(const trtmc::internal::TextToAudioRequest& request,
+                                     trtmc::internal::ConfigView config) override;
 
     void set_codec_module(std::unique_ptr<ITrtModule> codec);
     void set_fine_module(std::unique_ptr<ITrtModule> fine);

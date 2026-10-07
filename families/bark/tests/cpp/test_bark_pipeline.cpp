@@ -150,7 +150,10 @@ void test_bark_generate_audio() {
     trtmc::internal::ITextToAudio& audio = pipeline;
     trtmc::internal::TextToAudioRequest request;
     request.prompt = "";
-    trtmc::internal::ConfigView cfg{};
+    const trtmc::internal::ConfigEntry entries[] = {
+        {"max_new_tokens", trtmc::internal::ConfigValue{std::int64_t{1}}},
+    };
+    trtmc::internal::ConfigView cfg{entries, 1};
     const auto output = audio.run(request, cfg);
 
     check(!output.samples.empty(), "bark run produces samples");
@@ -190,7 +193,10 @@ void test_bark_batches_semantic_and_coarse_prefill() {
 
     trtmc::internal::TextToAudioRequest request;
     request.prompt = "";
-    trtmc::internal::ConfigView cfg{};
+    const trtmc::internal::ConfigEntry entries[] = {
+        {"max_new_tokens", trtmc::internal::ConfigValue{std::int64_t{1}}},
+    };
+    trtmc::internal::ConfigView cfg{entries, 1};
     (void)pipeline.run(request, cfg);
 
     check(semantic_stats->calls == 1, "bark semantic prefill uses one batched call");
@@ -222,7 +228,10 @@ void test_bark_dual_profile_decode_uses_one_embedding_row() {
 
     trtmc::internal::TextToAudioRequest request;
     request.prompt = "";
-    trtmc::internal::ConfigView cfg{};
+    const trtmc::internal::ConfigEntry entries[] = {
+        {"max_new_tokens", trtmc::internal::ConfigValue{std::int64_t{2}}},
+    };
+    trtmc::internal::ConfigView cfg{entries, 1};
     (void)pipeline.run(request, cfg);
 
     check(semantic_decode_stats->calls == 2,

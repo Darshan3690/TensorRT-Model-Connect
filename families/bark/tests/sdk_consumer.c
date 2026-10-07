@@ -14,20 +14,18 @@
  *   TRTMC_BARK_PROMPT   text prompt (default: "Hello from Bark.")
  */
 
-#include <trtmc/audio.h>
-#include <trtmc/trtmc.h>
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <trtmc/audio.h>
+#include <trtmc/trtmc.h>
 
 /* ── helpers ─────────────────────────────────────────────────────────────── */
 
-static void check(trtmc_status status, const trtmc_core_api_v1* api,
-                  trtmc_error** err, const char* label) {
+static void check(trtmc_status status, const trtmc_core_api_v1* api, trtmc_error** err,
+                  const char* label) {
     if (status != TRTMC_OK) {
-        fprintf(stderr, "%s failed: %s\n", label,
-                api ? api->error_message(*err) : "(no api)");
+        fprintf(stderr, "%s failed: %s\n", label, api ? api->error_message(*err) : "(no api)");
         if (api && *err)
             api->error_release(*err);
         exit(1);
@@ -36,7 +34,7 @@ static void check(trtmc_status status, const trtmc_core_api_v1* api,
 
 static trtmc_string_view sv(const char* s) {
     trtmc_string_view v;
-    v.data   = s;
+    v.data = s;
     v.length = strlen(s);
     return v;
 }
@@ -46,7 +44,7 @@ int main(int argc, char** argv) {
         fprintf(stderr, "usage: %s <bundle_path> <runtime_root>\n", argv[0]);
         return 1;
     }
-    const char* bundle_path  = argv[1];
+    const char* bundle_path = argv[1];
     const char* runtime_root = argv[2];
 
     const char* env_prompt = getenv("TRTMC_BARK_PROMPT");
@@ -68,12 +66,11 @@ int main(int argc, char** argv) {
     /* ── text_to_audio ────────────────────────────────────────────────────── */
     {
         const trtmc_api_header* task_header = NULL;
-        check(api->model_get_task_api(model, sv(TRTMC_TASK_TEXT_TO_AUDIO), 1, 0,
-                                      &task_header, &err),
-              api, &err, "get text_to_audio");
+        check(
+            api->model_get_task_api(model, sv(TRTMC_TASK_TEXT_TO_AUDIO), 1, 0, &task_header, &err),
+            api, &err, "get text_to_audio");
 
-        const trtmc_text_to_audio_api_v1* task =
-            (const trtmc_text_to_audio_api_v1*)task_header;
+        const trtmc_text_to_audio_api_v1* task = (const trtmc_text_to_audio_api_v1*)task_header;
 
         trtmc_text_to_audio_request_v1 req;
         memset(&req, 0, sizeof(req));
@@ -95,16 +92,22 @@ int main(int argc, char** argv) {
             api->model_release(model);
             return 1;
         }
-        if (view.audio.sample_rate == 0) {
-            fprintf(stderr, "text_to_audio: expected non-zero sample_rate\n");
+        if (view.audio.sample_rate != 24000) {
+            fprintf(stderr, "text_to_audio: expected sample_rate == 24000, got %u\n",
+                    view.audio.sample_rate);
+            api->result_release(result);
+            api->model_release(model);
+            return 1;
+        }
+        if (view.audio.channels != 1) {
+            fprintf(stderr, "text_to_audio: expected channels == 1, got %u\n", view.audio.channels);
             api->result_release(result);
             api->model_release(model);
             return 1;
         }
 
         printf("text_to_audio: samples=%llu sample_rate=%u channels=%u\n",
-               (unsigned long long)view.audio.sample_count,
-               view.audio.sample_rate,
+               (unsigned long long)view.audio.sample_count, view.audio.sample_rate,
                view.audio.channels);
         api->result_release(result);
     }

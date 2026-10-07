@@ -15,20 +15,19 @@
  *   TRTMC_BARK_PROMPT   text prompt (default: "Hello from Bark.")
  */
 
-#include <trtmc/audio.hpp>
-#include <trtmc/trtmc.hpp>
-
 #include <cstdlib>
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <trtmc/audio.hpp>
+#include <trtmc/trtmc.hpp>
 
 int main(int argc, char** argv) {
     if (argc < 3) {
         std::cerr << "usage: " << argv[0] << " <bundle_path> <runtime_root>\n";
         return 1;
     }
-    const std::string bundle_path  = argv[1];
+    const std::string bundle_path = argv[1];
     const std::string runtime_root = argv[2];
 
     const char* env_prompt = std::getenv("TRTMC_BARK_PROMPT");
@@ -48,17 +47,15 @@ int main(int argc, char** argv) {
 
             if (result.samples().empty())
                 throw std::runtime_error("text_to_audio: result has no samples");
-            if (result.sample_rate() == 0)
-                throw std::runtime_error("text_to_audio: result has zero sample_rate");
-            if (result.channels() == 0)
-                throw std::runtime_error("text_to_audio: result has zero channels");
+            if (result.sample_rate() != 24000)
+                throw std::runtime_error("text_to_audio: expected sample_rate == 24000");
+            if (result.channels() != 1)
+                throw std::runtime_error("text_to_audio: expected channels == 1");
 
             std::cout << "text_to_audio: samples=" << result.samples().size()
                       << " sample_rate=" << result.sample_rate()
-                      << " channels=" << result.channels()
-                      << " duration_s="
-                      << static_cast<double>(result.frame_count()) / result.sample_rate()
-                      << "\n";
+                      << " channels=" << result.channels() << " duration_s="
+                      << static_cast<double>(result.frame_count()) / result.sample_rate() << "\n";
         }
 
     } catch (const std::exception& ex) {
