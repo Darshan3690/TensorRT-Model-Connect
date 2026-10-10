@@ -150,11 +150,11 @@ void test_bark_generate_audio() {
     trtmc::internal::ITextToAudio& audio = pipeline;
     trtmc::internal::TextToAudioRequest request;
     request.prompt = "";
-    const trtmc::internal::ConfigEntry entries[] = {
+    const trtmc::internal::ConfigEntry initial_entries[] = {
         {"max_new_tokens", trtmc::internal::ConfigValue{std::int64_t{1}}},
     };
-    trtmc::internal::ConfigView cfg{entries, 1};
-    const auto output = audio.run(request, cfg);
+    trtmc::internal::ConfigView initial_cfg{initial_entries, 1};
+    const auto output = audio.run(request, initial_cfg);
 
     check(!output.samples.empty(), "bark run produces samples");
     check(output.sample_rate == 24000, "bark run sample_rate");
@@ -163,11 +163,11 @@ void test_bark_generate_audio() {
     check(bindings.size() == 1, "bark task bindings count");
     check(bindings[0].fields.size() == 2, "bark task bindings declared fields");
 
-    const trtmc::internal::ConfigEntry entries[] = {
+    const trtmc::internal::ConfigEntry custom_entries[] = {
         {"max_new_tokens", trtmc::internal::ConfigValue{std::int64_t{10}}},
         {"seed", trtmc::internal::ConfigValue{std::int64_t{42}}},
     };
-    trtmc::internal::ConfigView custom_cfg{entries, 2};
+    trtmc::internal::ConfigView custom_cfg{custom_entries, 2};
     const auto custom_output = audio.run(request, custom_cfg);
     check(!custom_output.samples.empty(), "bark run custom config produces samples");
 
