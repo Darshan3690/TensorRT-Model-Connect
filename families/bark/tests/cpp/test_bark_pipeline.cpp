@@ -174,6 +174,67 @@ void test_bark_generate_audio() {
     cudaStreamDestroy(stream);
 }
 
+void test_bark_seed_handling() {
+    cudaStream_t stream = nullptr;
+    cudaStreamCreate(&stream);
+    const std::vector<float> semantic_logits = {0.5F, 0.4F, 0.3F, 0.2F, 0.1F};
+    const std::vector<float> coarse_logits(12, 0.1F);
+    std::vector<float> semantic_embed(6 * 4, 0.1F);
+    std::vector<float> coarse_embed(11 * 4, 0.1F);
+
+    auto cfg = config();
+    cfg.greedy = false;
+
+    trtmc::BarkPipeline pipeline(
+        module(std::make_shared<ModuleStats>(), semantic_logits, 512, stream),
+        module(std::make_shared<ModuleStats>(), coarse_logits, 16, stream), cache(512, stream),
+        cache(16, stream), std::move(semantic_embed), std::move(coarse_embed), cfg, stream);
+
+    trtmc::internal::ITextToAudio& audio = pipeline;
+    trtmc::internal::TextToAudioRequest request;
+    request.prompt = "";
+
+    const std::int64_t seed_a = 42;
+    const trtmc::internal::ConfigEntry entries_seed_a[] = {
+        {"max_new_tokens", trtmc::internal::ConfigValue{std::int64_t{5}}},
+        {"seed", trtmc::internal::ConfigValue{seed_a}},
+    };
+    trtmc::internal::ConfigView cfg_seed_a{entries_seed_a, 2};
+    const auto output_a1 = audio.run(request, cfg_seed_a);
+    const auto output_a2 = audio.run(request, cfg_seed_a);
+
+    check(!output_a1.samples.empty(), "bark non-greedy run produces samples");
+    check(output_a1.samples == output_a2.samples,
+          "bark non-greedy run is deterministic for identical seed");
+
+    const std::int64_t seed_b = seed_a | (std::int64_t{1} << 35);
+    const trtmc::internal::ConfigEntry entries_seed_b[] = {
+        {"max_new_tokens", trtmc::internal::ConfigValue{std::int64_t{5}}},
+        {"seed", trtmc::internal::ConfigValue{seed_b}},
+    };
+    trtmc::internal::ConfigView cfg_seed_b{entries_seed_b, 2};
+    const auto output_b = audio.run(request, cfg_seed_b);
+
+    check(!output_b.samples.empty(), "bark non-greedy run with 64-bit seed produces samples");
+    check(output_a1.samples != output_b.samples,
+          "bark non-greedy run distinguishes seeds differing only in upper 32 bits");
+
+    bool threw_invalid_seed = false;
+    try {
+        const trtmc::internal::ConfigEntry entries_invalid[] = {
+            {"max_new_tokens", trtmc::internal::ConfigValue{std::int64_t{1}}},
+            {"seed", trtmc::internal::ConfigValue{std::int64_t{-2}}},
+        };
+        trtmc::internal::ConfigView cfg_invalid{entries_invalid, 2};
+        (void)audio.run(request, cfg_invalid);
+    } catch (const trtmc::internal::ConfigError&) {
+        threw_invalid_seed = true;
+    }
+    check(threw_invalid_seed, "bark run rejects seed < -1 with ConfigError");
+
+    cudaStreamDestroy(stream);
+}
+
 void test_bark_batches_semantic_and_coarse_prefill() {
     cudaStream_t stream = nullptr;
     cudaStreamCreate(&stream);
@@ -290,6 +351,7 @@ int main() {
         return 77;
     }
     test_bark_generate_audio();
+    test_bark_seed_handling();
     test_bark_batches_semantic_and_coarse_prefill();
     test_bark_dual_profile_decode_uses_one_embedding_row();
     test_bark_constructor_validates_semantic();
