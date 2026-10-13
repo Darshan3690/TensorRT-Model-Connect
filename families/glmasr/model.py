@@ -328,6 +328,8 @@ def _tokenizer_runtime_contract(model_dir: Path) -> dict[str, object]:
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build a GLM-ASR bundle using the family-owned encoder and decoder."""
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("GLM-ASR does not support MTP speculative decoding")
     if request.task != "transcription":
         raise ValueError("glmasr supports only task=transcription")
     if request.max_batch_size != 1 or request.context_parallel_size != 1:
