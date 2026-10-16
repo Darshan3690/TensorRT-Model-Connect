@@ -29,6 +29,39 @@ def test_feature_shapes_round_the_extra_level_up():
     assert config.feature_shapes(800, 4)[-1] == (13, 13)
 
 
+def test_feature_shapes_round_every_strided_convolution_up():
+    from families.deformable_detr import config
+
+    assert config.feature_shapes(1333, 4) == [(167, 167), (84, 84), (42, 42), (21, 21)]
+
+
+@pytest.mark.parametrize("size,expected", [
+    ({"shortest_edge": 800, "longest_edge": 1333}, (800, 1333)),
+    (800, (800, 1333)),
+    ({"shortest_edge": 600, "longest_edge": 1000}, (800, 1333)),
+])
+def test_resolve_preserves_checkpoint_resize_ratio(tmp_path, size, expected):
+    from families.deformable_detr import config
+
+    (tmp_path / "config.json").write_text("{}")
+    (tmp_path / "preprocessor_config.json").write_text(json.dumps({"size": size}))
+    resolved = config.resolve(tmp_path, image_size=800)
+    assert (resolved["resize_shortest_edge"], resolved["resize_longest_edge"]) == expected
+
+
+@pytest.mark.parametrize("size", [
+    {"shortest_edge": 0, "longest_edge": 1333},
+    {"shortest_edge": 800, "longest_edge": 700},
+])
+def test_resolve_rejects_invalid_resize_bounds(tmp_path, size):
+    from families.deformable_detr import config
+
+    (tmp_path / "config.json").write_text("{}")
+    (tmp_path / "preprocessor_config.json").write_text(json.dumps({"size": size}))
+    with pytest.raises(ValueError, match="resize bounds"):
+        config.resolve(tmp_path, image_size=800)
+
+
 def test_sine_embedding_matches_its_declared_shape():
     from families.deformable_detr import position_builder
 
@@ -131,3 +164,24 @@ def test_checkpoint_rejects_a_rename_collision():
             "model.encoder.layers.0.fc1.weight": 1,
             "model.encoder.layers.0.mlp.fc1.weight": 2,
         })
+
+
+def test_benchmark_profile_matches_the_native_checkpoint_and_shape():
+    from pathlib import Path
+
+    import yaml
+
+    root = Path(__file__).resolve().parent
+    manifest = json.loads((root / "manifests/deformable-detr-r50.json").read_text())
+    profile = yaml.safe_load((root / "benchmark/deformable-detr-r50.yaml").read_text())
+    candidate = profile["candidate"]
+    assert candidate["family"] == manifest["family"]
+    assert candidate["checkpoint"] == manifest["hf_id"]
+    assert candidate["revision"] == manifest["hf_revision"]
+    assert candidate["task"] == manifest["task"]
+    assert candidate["precision"] == manifest["precision"]
+    assert candidate["bundle"] == manifest["bundle"]
+    assert candidate["build"] == {
+        "image_height": manifest["image_height"],
+        "image_width": manifest["image_width"],
+    }
