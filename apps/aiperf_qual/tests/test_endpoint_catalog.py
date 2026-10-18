@@ -64,3 +64,9 @@ def test_image_inventory_covers_existing_checkpoints_and_excludes_legacy_video()
         "flux-2-dev", "flux-schnell", "pixart-sigma-1024", "qwen-image", "qwen-image-2512",
         "stable-diffusion-v1-5", "z-image-turbo"}
     assert all("Wan" not in row["checkpoint"] and "MiniMax" not in row["checkpoint"] for row in rows)
+
+
+def test_edit_inventory_requires_the_declared_reference_conditioned_task():
+    for task in ("image_edit", "images_text_to_image_edit"):
+        row, = group_inventory([entry("generator", task="image_generation"), entry("editor", task=task)], "image-edit")
+        assert row["profile"] == "editor" and row["variants"][0]["task"] == task
