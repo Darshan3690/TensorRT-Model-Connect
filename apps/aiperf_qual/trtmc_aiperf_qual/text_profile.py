@@ -116,6 +116,8 @@ def cases(config: dict[str, Any]) -> list[dict[str, Any]]:
         multi_turn = config["corpus"].get("format") == "sharegpt_multi_turn"
         if multi_turn and len({item["output_tokens"] for item in result}) != 1:
             raise ConfigError("conversation profiles require one output-token cap for their per-turn settings")
+        if config["corpus"].get("format") == "spec_bench" and len({item["output_tokens"] for item in result}) != 1:
+            raise ConfigError("SpecBench profiles require one output-token cap for matched native accounting")
         if type(count) is not int or count < 1 or workload.get("requests", 20) < count * (2 if multi_turn else 1):
             raise ConfigError("corpus count must be positive and every prompt needs a measured request")
         allowed = {"chat"} if multi_turn else ({"completions"} if trace else {"completions", "responses"})
@@ -335,6 +337,9 @@ def profile(environment: Environment, config_path: Path, out: Path) -> dict[str,
                 entries.append({"case": case, "exit_code": run.exit_code or int(incomplete),
                                 "incomplete_export": incomplete, "command": run.command,
                                 "summary": summarize(rows), "aiperf_summary": run.summary})
+                if corpus and corpus.get("format") == "spec_bench":
+                    entries[-1].update(runtime_mode=corpus["runtime_mode"],
+                                       speculative_execution=corpus["speculative_execution"])
                 if corpus and corpus.get("format") == "sharegpt_multi_turn":
                     entries[-1]["per_turn"] = {str(turn): summarize([row for row in rows
                         if row["client_metadata"].get("turn_index") == turn]) for turn in (0, 1)}
