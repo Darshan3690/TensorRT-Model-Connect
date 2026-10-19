@@ -87,6 +87,8 @@ def cases(config: dict[str, Any]) -> list[dict[str, Any]]:
     result = [dict(zip(axes, values)) for values in itertools.product(*axes.values())]
     if not result:
         raise ConfigError("text workload axes must be nonempty")
+    if config.get("corpus", {}).get("format") == "controlled_prefix" and len(result) != 1:
+        raise ConfigError("controlled-prefix profiles require one workload case per fresh server process")
     for item in result:
         if item["endpoint"] not in {"completions", "chat"} or type(item["streaming"]) is not bool:
             raise ConfigError("text profiles support completions/chat and boolean streaming only")
@@ -295,7 +297,7 @@ def profile(environment: Environment, config_path: Path, out: Path) -> dict[str,
             capacity = inspected.get("provenance", {}).get("build", {}).get("max_sequence_length")
             if type(capacity) is not int or capacity < 1:
                 raise ConfigError("real prompts require the bundle's explicit core context limit")
-            corpus = prepare(config, capacity, max(case["output_tokens"] or 0 for case in matrix), out)
+            corpus = prepare(config, capacity, max(case["output_tokens"] or 0 for case in matrix), out, repo=repo)
             provenance["corpus"] = corpus
         (out / "provenance.json").write_text(json.dumps(provenance, indent=2) + "\n")
         with text_serving(environment, config["server"], out / "server") as service:
