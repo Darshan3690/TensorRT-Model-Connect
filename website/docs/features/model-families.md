@@ -277,6 +277,40 @@ changing its reference or accuracy checks. Prepared and speculative mappings
 are not blanket accuracy qualifications; the family recipe separates local
 results from unexecuted combinations and known quality limitations.
 
+### Optional Qwen3.5/3.6 MoE Edge execution
+
+`trtmc qwen3_5_moe build MODEL -o model.bundle` owns the GPTQ Qwen3.5 35B-A3B
+and NVFP4 Qwen3.6 35B-A3B routes. Its family-local options select explicit
+DFlash companions, greedy DDTree, or the documented embedded NVFP4 MTP recipe.
+Visual bundles map the existing image and video Task interfaces directly to
+Edge preprocessing and runtime APIs. Shared model selection remains unchanged.
+
+The native SDK is pinned to official Edge-LLM 0.11.0. Compatible PyPI Python
+tools are discovered automatically; a source-built installation also works,
+and matching native headers, libraries and plugins remain required.
+Builds preserve each source checkpoint's weight quantization recipe, with FP16
+compute and single-device execution. The published NVFP4 checkpoint lacks
+exported K/V scales and therefore uses FP16 KV storage; prepared sources with
+actual exported scales retain FP8 KV. Larger/original checkpoints outside the
+measured memory admission are not advertised as qualified configurations.
+
+Runtime availability is not an accuracy claim: speculative decoding and NVFP4
+repeatability have recorded quality failures. Those routes remain executable
+with unchanged validation gates. See the
+[family recipe](https://github.com/NVIDIA/TensorRT-Model-Connect/blob/main/families/qwen3_5_moe/edge_llm/README.md)
+for exact recipes, commands, Task boundaries and qualification limitations.
+
+When no compatible Edge route exists or Edge preparation fails, the same family
+owns native TensorRT Python graph construction and Model Connect C++ execution,
+including prepared routed experts and media inputs. Publication errors,
+cancellation and runtime errors do not trigger this fallback. Native execution
+needs neither Edge nor ONNX.
+The existing validation checks seed rejection on Edge and seeded request-local
+repeatability on native, retaining capacity recovery, the independent checkpoint
+reference and the unchanged accuracy gate. Native speculative mappings and
+incomplete full-model builds are not presented as completed qualification; see
+the owning recipe for limitations.
+
 ## Optional Llama Edge execution
 
 Use `trtmc llama build MODEL -o model.bundle` with the owning
