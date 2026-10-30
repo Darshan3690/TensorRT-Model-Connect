@@ -196,8 +196,9 @@ EncoderPipeline::run(const trtmc::internal::TextPairToRelevanceRequest& request,
     const auto raw_floats = encode_ids(ids);
 
     trtmc::internal::RelevanceResult result;
-    if (!raw_floats.empty())
-        result.score = raw_floats[0];
+    if (raw_floats.empty())
+        throw std::runtime_error("EncoderPipeline: relevance output is empty");
+    result.score = raw_floats[0];
     return result;
 }
 

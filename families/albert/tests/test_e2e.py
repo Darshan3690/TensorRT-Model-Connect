@@ -254,7 +254,7 @@ def _native(
     case: dict,
     tmp_path: Path,
 ):
-    manifest["task"]
+    del model_dir, tmp_path
     return _run_json(
         binary, runtime_root, bundle, manifest, case, "encode", "--text", _case_text(case)
     )

@@ -310,7 +310,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     parallel.validate()
     model = _AlbertModel()
     weights = model.load_weights(str(model_dir), config)
-    writer.set_header(family="albert", task=request.task, backend=request.backend)
+    header_task = "text_to_pooled_features" if request.task == "encoding" else request.task
+    writer.set_header(family="albert", task=header_task, backend=request.backend)
     if parallel.enabled:
         for rank in range(parallel.tp_size):
             plan = model.build_engine(
