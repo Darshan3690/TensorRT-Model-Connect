@@ -46,14 +46,14 @@ std::int32_t require_tensor_parallel_size(const nlohmann::json& config) {
 }
 
 std::string require_task(const BundleInfo& info) {
-    using trtmc::internal::ITextPairToRelevance;
+
     using trtmc::internal::ITextToEmbedding;
     using trtmc::internal::ITextToPooledFeatures;
     using trtmc::internal::ITextToTokenFeatures;
     if (info.task == std::string(ITextToPooledFeatures::kTask) ||
         info.task == std::string(ITextToTokenFeatures::kTask) ||
-        info.task == std::string(ITextToEmbedding::kTask) ||
-        info.task == std::string(ITextPairToRelevance::kTask)) {
+        info.task == std::string(ITextToEmbedding::kTask)) {
+
         return info.task;
     }
     if (info.task == "encoding") {

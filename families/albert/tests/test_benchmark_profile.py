@@ -32,7 +32,7 @@ from families.albert.model import build  # noqa: E402
 
 
 def test_albert_builder_accepts_encoding_task():
-    """Verify that build accepts legacy 'encoding' task and translates it to 'text_to_pooled_features'."""
+    """Verify that build accepts legacy 'encoding' task and publishes it to header."""
     dummy_request = SimpleNamespace(
         dynamic_kv_cache=False,
         image_height=None,
@@ -49,6 +49,7 @@ def test_albert_builder_accepts_encoding_task():
         tensor_parallel_size=1,
         backend="tensorrt",
         verbose=False,
+        mtp_seq_len=None,
     )
 
     writer = MagicMock()
@@ -63,10 +64,10 @@ def test_albert_builder_accepts_encoding_task():
 
         build(dummy_request, writer)
 
-        # Header task written to bundle must be "text_to_pooled_features"
+        # Header task written to bundle must be "encoding"
         writer.set_header.assert_called_once_with(
             family="albert",
-            task="text_to_pooled_features",
+            task="encoding",
             backend="tensorrt",
         )
 
@@ -77,7 +78,6 @@ def test_albert_builder_accepts_semantic_tasks():
         "text_to_pooled_features",
         "text_to_token_features",
         "text_to_embedding",
-        "text_pair_to_relevance",
     ):
         req = SimpleNamespace(
             dynamic_kv_cache=False,
@@ -95,6 +95,7 @@ def test_albert_builder_accepts_semantic_tasks():
             tensor_parallel_size=1,
             backend="tensorrt",
             verbose=False,
+            mtp_seq_len=None,
         )
 
         writer = MagicMock()
@@ -133,6 +134,7 @@ def test_albert_builder_rejects_unsupported_task():
         tensor_parallel_size=1,
         backend="tensorrt",
         verbose=False,
+        mtp_seq_len=None,
     )
     writer = MagicMock()
     with pytest.raises(ValueError, match="albert task must be"):
